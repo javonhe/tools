@@ -206,36 +206,112 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         with open(PREFERENCES_FILE, 'w', encoding='utf-8') as f:
             json.dump(preferences, f, ensure_ascii=False, indent=2)
 
-def get_local_ip():
-    """获取本机的IP地址"""
+def get_network_interfaces():
+    """获取所有可用的网络接口"""
+    interfaces = []
     try:
-        # 创建一个临时socket连接到外部，从而获取本机IP
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # 不需要真正连接到8.8.8.8，只是用来确定使用哪个网络接口
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except:
-        # 如果上面的方法失败，尝试其他方法
+        # 获取所有网络接口
+        for interface in socket.getaddrinfo(socket.gethostname(), None):
+            ip = interface[4][0]
+            # 只添加IPv4地址，排除localhost
+            if ':' not in ip and ip != '127.0.0.1':
+                interfaces.append(ip)
+
+        # 尝试获取外部连接的IP
         try:
-            return socket.gethostbyname(socket.gethostname())
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip not in interfaces:
+                interfaces.append(ip)
         except:
-            return "127.0.0.1"  # 如果所有方法都失败，返回localhost
+            pass
+
+        # 如果没有找到任何接口，添加localhost
+        if not interfaces:
+            interfaces.append('127.0.0.1')
+
+        return interfaces
+    except:
+        return ['127.0.0.1']
+
+def get_preferred_ip(preferences):
+    """获取首选IP地址"""
+    interfaces = get_network_interfaces()
+    preferred_ip = preferences.get('preferred_ip')
+
+    # 如果有保存的首选IP且仍然可用，则使用它
+    if preferred_ip and preferred_ip in interfaces:
+        return preferred_ip
+
+    # 否则返回第一个可用的IP
+    return interfaces[0]
 
 def run_server(port=8000):
     """运行HTTP服务器"""
     handler = FileHandler
 
-    # 获取本机IP地址
-    local_ip = get_local_ip()
+    # 加载用户偏好
+    preferences = {}
+    if os.path.exists(PREFERENCES_FILE):
+        try:
+            with open(PREFERENCES_FILE, 'r', encoding='utf-8') as f:
+                preferences = json.load(f)
+        except:
+            pass
+
+    # 获取所有可用的网络接口
+    interfaces = get_network_interfaces()
+
+    # 显示网络接口选择
+    print("\n可用的网络接口：")
+    default_ip = preferences.get('preferred_ip')
+
+    # 如果默认IP不在当前可用的接口中，设为None
+    if default_ip and default_ip not in interfaces:
+        default_ip = None
+
+    # 显示所有接口，标记默认选项
+    for i, ip in enumerate(interfaces, 1):
+        default_mark = " (上次选择)" if ip == default_ip else ""
+        print(f"{i}. http://{ip}:{port}/{default_mark}")
+
+    # 如果只有一个接口，直接使用它
+    if len(interfaces) == 1:
+        selected_ip = interfaces[0]
+        print(f"\n只有一个可用接口，将使用: http://{selected_ip}:{port}/")
+    else:
+        # 让用户选择接口
+        while True:
+            try:
+                default_index = interfaces.index(default_ip) + 1 if default_ip in interfaces else 1
+                choice = input(f"\n请选择网络接口 (1-{len(interfaces)}, 直接回车选择{default_index}): ").strip()
+
+                # 如果用户直接回车，使用默认值
+                if not choice:
+                    choice = str(default_index)
+
+                choice_index = int(choice) - 1
+                if 0 <= choice_index < len(interfaces):
+                    selected_ip = interfaces[choice_index]
+                    break
+                else:
+                    print("无效的选择，请重试")
+            except ValueError:
+                print("无效的输入，请输入数字")
+
+    # 保存用户选择
+    preferences['preferred_ip'] = selected_ip
+    with open(PREFERENCES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(preferences, f, ensure_ascii=False, indent=2)
 
     # 尝试绑定到指定端口，使用0.0.0.0地址允许外部连接
     try:
         httpd = socketserver.TCPServer(("0.0.0.0", port), handler)
-        print(f"服务器运行在 0.0.0.0:{port}")
+        print(f"\n服务器运行在 0.0.0.0:{port}")
         print(f"- 本机访问: http://localhost:{port}/")
-        print(f"- 局域网访问: http://{local_ip}:{port}/")
+        print(f"- 选定的访问地址: http://{selected_ip}:{port}/")
         print("按Ctrl+C停止服务器")
         httpd.serve_forever()
     except OSError as e:
