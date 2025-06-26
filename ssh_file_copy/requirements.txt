@@ -1,0 +1,6 @@
+# SSH文件传输工具依赖包
+# 主要依赖：paramiko - SSH协议实现库
+paramiko>=2.8.0
+
+# 其他依赖均为Python标准库，无需额外安装：
+# - os, json, hashlib, getpass, pathlib, typing, time, base64, sys, stat
