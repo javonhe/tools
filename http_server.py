@@ -11,6 +11,33 @@ import socket  # 添加socket模块用于获取IP地址
 # 用于存储用户偏好的文件
 PREFERENCES_FILE = "user_preferences.json"
 
+# 文件传输配置
+CHUNK_SIZE = 8192  # 8KB 传输块大小
+
+# 全局配置
+_config = {
+    'max_file_size': 1024 * 1024 * 1024  # 1GB 默认最大文件大小
+}
+
+def format_file_size(size_bytes):
+    """格式化文件大小显示"""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes/1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes/(1024*1024):.1f} MB"
+    else:
+        return f"{size_bytes/(1024*1024*1024):.1f} GB"
+
+def get_max_file_size():
+    """获取最大文件大小配置"""
+    return _config['max_file_size']
+
+def set_max_file_size(size_bytes):
+    """设置最大文件大小配置"""
+    _config['max_file_size'] = size_bytes
+
 class FileHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -80,12 +107,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                     file_time = datetime.fromtimestamp(os.path.getmtime(filename)).strftime('%Y-%m-%d %H:%M:%S')
 
                     # 格式化文件大小
-                    if file_size < 1024:
-                        size_str = f"{file_size} B"
-                    elif file_size < 1024 * 1024:
-                        size_str = f"{file_size/1024:.1f} KB"
-                    else:
-                        size_str = f"{file_size/(1024*1024):.1f} MB"
+                    size_str = format_file_size(file_size)
 
                     html += f"""
                     <li>
@@ -109,13 +131,30 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/download/'):
             filename = os.path.basename(path[10:])
             if os.path.isfile(filename):
+                file_size = os.path.getsize(filename)
                 self.send_response(200)
                 self.send_header('Content-type', 'application/octet-stream')
                 self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+                self.send_header('Content-Length', str(file_size))
                 self.end_headers()
 
-                with open(filename, 'rb') as f:
-                    self.wfile.write(f.read())
+                # 使用流式传输，避免内存溢出
+                try:
+                    with open(filename, 'rb') as f:
+                        while True:
+                            chunk = f.read(CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    # 客户端断开连接，这是正常的
+                    pass
+                except Exception as e:
+                    print(f"文件传输错误: {e}")
+                    # 如果还没有发送响应头，发送错误响应
+                    if not self.wfile.closed:
+                        self.send_error(500, "文件传输失败")
+                    return
             else:
                 self.send_error(404, "文件未找到")
             return
@@ -152,8 +191,32 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                 if fileitem.filename:
                     # 保存文件
                     filename = os.path.basename(fileitem.filename)
-                    with open(filename, 'wb') as f:
-                        f.write(fileitem.file.read())
+                    try:
+                        with open(filename, 'wb') as f:
+                            # 使用流式写入，避免内存溢出
+                            total_size = 0
+                            while True:
+                                chunk = fileitem.file.read(CHUNK_SIZE)
+                                if not chunk:
+                                    break
+                                total_size += len(chunk)
+                                if total_size > get_max_file_size():
+                                    # 删除已写入的部分文件
+                                    f.close()
+                                    os.remove(filename)
+                                    self.send_error(413, f"文件太大，最大允许 {format_file_size(get_max_file_size())}")
+                                    return
+                                f.write(chunk)
+                    except Exception as e:
+                        print(f"文件上传错误: {e}")
+                        # 如果文件已创建，删除它
+                        if os.path.exists(filename):
+                            try:
+                                os.remove(filename)
+                            except:
+                                pass
+                        self.send_error(500, "文件上传失败")
+                        return
 
                     # 重定向到主页
                     self.send_response(302)
@@ -261,6 +324,10 @@ def run_server(port=8000):
         except:
             pass
 
+    # 配置服务器以支持大文件传输
+    socketserver.TCPServer.allow_reuse_address = True
+    socketserver.TCPServer.timeout = 300  # 5分钟超时
+
     # 获取所有可用的网络接口
     interfaces = get_network_interfaces()
 
@@ -301,8 +368,44 @@ def run_server(port=8000):
             except ValueError:
                 print("无效的输入，请输入数字")
 
+    # 询问用户是否要修改最大文件大小
+    current_max_size = get_max_file_size() // (1024 * 1024)  # 转换为MB
+    print(f"\n当前最大文件大小: {current_max_size} MB")
+
+    while True:
+        try:
+            max_size_input = input(f"是否要修改最大文件大小？(y/N, 直接回车保持{current_max_size}MB): ").strip().lower()
+
+            if not max_size_input or max_size_input == 'n':
+                print(f"保持最大文件大小为 {current_max_size} MB")
+                break
+            elif max_size_input == 'y':
+                while True:
+                    try:
+                        new_max_size = input(f"请输入新的最大文件大小(MB) [{current_max_size}]: ").strip()
+                        if not new_max_size:
+                            print(f"保持最大文件大小为 {current_max_size} MB")
+                            break
+
+                        new_max_size = int(new_max_size)
+                        if new_max_size > 0:
+                            set_max_file_size(new_max_size * 1024 * 1024)  # 转换为字节
+                            print(f"最大文件大小已设置为 {new_max_size} MB")
+                            break
+                        else:
+                            print("最大文件大小必须大于0")
+                    except ValueError:
+                        print("请输入有效的数字")
+                break
+            else:
+                print("请输入 y 或 n")
+        except KeyboardInterrupt:
+            print(f"\n保持最大文件大小为 {current_max_size} MB")
+            break
+
     # 保存用户选择
     preferences['preferred_ip'] = selected_ip
+    preferences['max_file_size_mb'] = get_max_file_size() // (1024 * 1024)  # 保存为MB
     with open(PREFERENCES_FILE, 'w', encoding='utf-8') as f:
         json.dump(preferences, f, ensure_ascii=False, indent=2)
 
@@ -312,6 +415,7 @@ def run_server(port=8000):
         print(f"\n服务器运行在 0.0.0.0:{port}")
         print(f"- 本机访问: http://localhost:{port}/")
         print(f"- 选定的访问地址: http://{selected_ip}:{port}/")
+        print(f"- 配置的最大文件大小: {format_file_size(get_max_file_size())}")
         print("按Ctrl+C停止服务器")
         httpd.serve_forever()
     except OSError as e:
@@ -325,7 +429,12 @@ if __name__ == "__main__":
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='HTTP文件和文本服务器')
     parser.add_argument('-p', '--port', type=int, default=8000, help='服务器端口 (默认: 8000)')
+    parser.add_argument('-m', '--max-size', type=int, default=1024,
+                       help='最大文件大小(MB) (默认: 1024 MB)')
     args = parser.parse_args()
+
+    # 设置最大文件大小
+    set_max_file_size(args.max_size * 1024 * 1024)  # 转换为字节
 
     # 记住之前的端口
     preferences = {}
@@ -335,6 +444,12 @@ if __name__ == "__main__":
                 preferences = json.load(f)
         except:
             pass
+
+    # 如果用户没有通过命令行指定最大文件大小，则使用之前保存的设置
+    if args.max_size == 1024 and 'max_file_size_mb' in preferences:
+        saved_max_size = preferences['max_file_size_mb']
+        set_max_file_size(saved_max_size * 1024 * 1024)
+        print(f"使用之前保存的最大文件大小设置: {saved_max_size} MB")
 
     port = args.port
     if port == 8000 and 'last_port' in preferences:
