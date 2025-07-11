@@ -11,15 +11,18 @@ import hashlib
 import paramiko
 import getpass
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import time
 import base64
+from datetime import datetime
 
 
 class SSHFileTransfer:
     def __init__(self, config_file: str = "ssh_transfer_config.json"):
         self.config_file = config_file
         self.config = self.load_config()
+        self.history_file = "ssh_transfer_history.json"
+        self.history = self.load_history()
 
     def load_config(self) -> Dict[str, Any]:
         """加载配置文件"""
@@ -32,6 +35,17 @@ class SSHFileTransfer:
                 return self.get_default_config()
         return self.get_default_config()
 
+    def load_history(self) -> List[Dict[str, Any]]:
+        """加载历史配置记录"""
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"历史记录加载失败: {e}")
+                return []
+        return []
+
     def get_default_config(self) -> Dict[str, Any]:
         """获取默认配置"""
         return {
@@ -41,7 +55,9 @@ class SSHFileTransfer:
             "password": "",
             "source_file": "",
             "target_dir": "",
-            "target_filename": ""
+            "target_filename": "",
+            "file_permissions": "644",  # 默认文件权限
+            "set_permissions": False    # 是否设置文件权限
         }
 
     def save_config(self):
@@ -54,10 +70,180 @@ class SSHFileTransfer:
         except IOError as e:
             print(f"配置保存失败: {e}")
 
+    def save_history(self):
+        """保存历史配置记录"""
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, indent=2, ensure_ascii=False)
+        except IOError as e:
+            print(f"历史记录保存失败: {e}")
+
+    def add_to_history(self, config: Dict[str, Any]):
+        """添加配置到历史记录"""
+        # 创建历史记录项（不包含密码）
+        history_item = {
+            "timestamp": datetime.now().isoformat(),
+            "ip": config.get('ip', ''),
+            "port": config.get('port', 22),
+            "username": config.get('username', ''),
+            "source_file": config.get('source_file', ''),
+            "target_dir": config.get('target_dir', ''),
+            "target_filename": config.get('target_filename', ''),
+            "target_path": config.get('target_path', ''),
+            "file_permissions": config.get('file_permissions', '644'),
+            "set_permissions": config.get('set_permissions', False),
+            "description": f"{config.get('ip', '')}:{config.get('port', 22)} - {config.get('username', '')} - {os.path.basename(config.get('source_file', ''))}"
+        }
+
+        # 检查是否已存在相同配置（基于IP、端口、用户名、源文件）
+        for i, existing in enumerate(self.history):
+            if (existing.get('ip') == history_item['ip'] and
+                existing.get('port') == history_item['port'] and
+                existing.get('username') == history_item['username'] and
+                existing.get('source_file') == history_item['source_file']):
+                # 更新现有记录
+                self.history[i] = history_item
+                break
+        else:
+            # 添加新记录
+            self.history.append(history_item)
+
+        # 保持最多20条历史记录
+        if len(self.history) > 20:
+            self.history = self.history[-20:]
+
+        self.save_history()
+
+    def display_history(self):
+        """显示历史配置记录"""
+        if not self.history:
+            print("暂无历史配置记录")
+            return None
+
+        print("\n=== 历史配置记录 ===")
+        for i, record in enumerate(self.history, 1):
+            timestamp = record.get('timestamp', '')
+            if timestamp:
+                try:
+                    dt = datetime.fromisoformat(timestamp)
+                    time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    time_str = timestamp
+            else:
+                time_str = "未知时间"
+
+            print(f"{i:2d}. {time_str} - {record.get('description', '无描述')}")
+            print(f"    IP: {record.get('ip', '')}:{record.get('port', '')}")
+            print(f"    用户: {record.get('username', '')}")
+            print(f"    源文件: {record.get('source_file', '')}")
+            print(f"    目标: {record.get('target_path', '')}")
+            if record.get('set_permissions', False):
+                print(f"    权限: {record.get('file_permissions', '644')}")
+            print()
+
+        return len(self.history)
+
+    def select_from_history(self) -> Optional[Dict[str, Any]]:
+        """从历史记录中选择配置"""
+        history_count = self.display_history()
+        if not history_count:
+            return None
+
+        while True:
+            try:
+                choice = input(f"请选择历史配置 (1-{history_count}) 或输入 'n' 创建新配置: ").strip()
+
+                if choice.lower() == 'n':
+                    return None
+
+                choice_num = int(choice)
+                if 1 <= choice_num <= history_count:
+                    selected_record = self.history[choice_num - 1]
+                    print(f"已选择: {selected_record.get('description', '')}")
+
+                    # 构建配置（密码需要用户输入）
+                    config = {
+                        "ip": selected_record.get('ip', ''),
+                        "port": selected_record.get('port', 22),
+                        "username": selected_record.get('username', ''),
+                        "password": "",  # 需要用户输入
+                        "source_file": selected_record.get('source_file', ''),
+                        "target_dir": selected_record.get('target_dir', ''),
+                        "target_filename": selected_record.get('target_filename', ''),
+                        "target_path": selected_record.get('target_path', ''),
+                        "file_permissions": selected_record.get('file_permissions', '644'),
+                        "set_permissions": selected_record.get('set_permissions', False)
+                    }
+
+                    # 提示用户输入密码
+                    password = getpass.getpass("请输入密码: ")
+                    if password:
+                        config['password'] = password
+
+                        # 询问用户是否要修改配置
+                        print("\n选择操作:")
+                        print("1. 直接使用此配置")
+                        print("2. 使用此配置作为默认值并修改")
+
+                        try:
+                            use_choice = input("请选择 (1-2): ").strip()
+                            if use_choice == '1':
+                                return config
+                            elif use_choice == '2':
+                                return config  # 返回配置作为默认值，让用户修改
+                            else:
+                                print("无效选择，默认使用此配置作为默认值并允许修改")
+                                return config
+                        except KeyboardInterrupt:
+                            print("\n用户取消，默认使用此配置作为默认值并允许修改")
+                            return config
+                    else:
+                        print("密码不能为空，请重新选择")
+                        continue
+                else:
+                    print(f"无效选择，请输入 1-{history_count} 或 'n'")
+            except ValueError:
+                print("请输入有效的数字或 'n'")
+            except KeyboardInterrupt:
+                print("\n用户取消选择")
+                return None
+
     def get_user_input(self):
         """获取用户输入"""
         print("=== SSH文件传输工具 ===")
-        print("请输入连接信息 (直接回车使用默认值):")
+
+        # 首先显示历史记录供用户选择
+        selected_config = self.select_from_history()
+        if selected_config:
+            # 将选中的历史配置作为默认值
+            self.config = selected_config
+            print("使用历史配置作为默认值，您可以修改任何字段")
+        else:
+            print("创建新配置...")
+
+        # 检查是否所有必要字段都已填写
+        if (self.config.get('ip') and self.config.get('username') and
+            self.config.get('password') and self.config.get('source_file') and
+            self.config.get('target_dir')):
+
+            # 询问是否直接使用当前配置
+            print("\n当前配置:")
+            print(f"IP地址: {self.config.get('ip')}:{self.config.get('port', 22)}")
+            print(f"用户名: {self.config.get('username')}")
+            print(f"源文件: {self.config.get('source_file')}")
+            print(f"目标目录: {self.config.get('target_dir')}")
+            if self.config.get('target_filename'):
+                print(f"目标文件名: {self.config.get('target_filename')}")
+            if self.config.get('set_permissions', False):
+                print(f"文件权限: {self.config.get('file_permissions', '644')}")
+
+            try:
+                use_current = input("\n是否直接使用此配置？(y/N): ").strip().lower()
+                if use_current == 'y':
+                    print("使用当前配置")
+                    return
+            except KeyboardInterrupt:
+                print("\n继续编辑配置...")
 
         # IP地址
         ip = input(f"IP地址 [{self.config.get('ip', '')}]: ").strip()
@@ -85,7 +271,7 @@ class SSHFileTransfer:
             self.config['username'] = input("用户名: ").strip()
 
         # 密码
-        password = getpass.getpass("密码: ")
+        password = getpass.getpass(f"密码 (留空保持原密码): ")
         if password:
             self.config['password'] = password
         elif not self.config.get('password'):
@@ -109,7 +295,44 @@ class SSHFileTransfer:
         target_filename = input(f"目标文件名 (可选，留空使用原文件名) [{self.config.get('target_filename', '')}]: ").strip()
         if target_filename:
             self.config['target_filename'] = target_filename
-        # 如果用户直接回车，保持原有配置或设为空字符串，不需要再次提示
+
+        # 文件权限设置
+        print("\n=== 文件权限设置 ===")
+        print("常用权限说明:")
+        print("  644 - 所有者读写，组和其他用户只读 (默认)")
+        print("  755 - 所有者读写执行，组和其他用户读执行")
+        print("  600 - 只有所有者读写")
+        print("  777 - 所有用户读写执行 (不推荐)")
+
+        set_permissions = input(f"是否设置文件权限？(y/N) [{('y' if self.config.get('set_permissions', False) else 'N')}]: ").strip().lower()
+        if set_permissions == 'y' or (not set_permissions and self.config.get('set_permissions', False)):
+            self.config['set_permissions'] = True
+
+            # 输入权限值
+            permissions = input(f"请输入文件权限 (八进制格式，如644) [{self.config.get('file_permissions', '644')}]: ").strip()
+            if permissions:
+                # 验证权限格式
+                try:
+                    # 检查是否为有效的八进制权限
+                    if permissions.isdigit() and len(permissions) == 3:
+                        owner = int(permissions[0])
+                        group = int(permissions[1])
+                        other = int(permissions[2])
+                        if 0 <= owner <= 7 and 0 <= group <= 7 and 0 <= other <= 7:
+                            self.config['file_permissions'] = permissions
+                        else:
+                            print("权限值无效，使用默认值644")
+                            self.config['file_permissions'] = '644'
+                    else:
+                        print("权限格式无效，使用默认值644")
+                        self.config['file_permissions'] = '644'
+                except ValueError:
+                    print("权限值无效，使用默认值644")
+                    self.config['file_permissions'] = '644'
+            elif not self.config.get('file_permissions'):
+                self.config['file_permissions'] = '644'
+        else:
+            self.config['set_permissions'] = False
 
         # 保存配置
         self.save_config()
@@ -605,6 +828,36 @@ class SSHFileTransfer:
             print(f"计算远程MD5出错: {e}")
             return ""
 
+    def set_remote_file_permissions(self, ssh_client: paramiko.SSHClient, file_path: str, permissions: str) -> bool:
+        """设置远程文件的权限"""
+        try:
+            print(f"设置文件权限: {file_path} -> {permissions}")
+
+            # 使用chmod命令设置权限
+            stdin, stdout, stderr = ssh_client.exec_command(f"chmod {permissions} '{file_path}'", timeout=30)
+            exit_status = stdout.channel.recv_exit_status()
+
+            if exit_status == 0:
+                # 验证权限是否设置成功
+                stdin, stdout, stderr = ssh_client.exec_command(f"ls -la '{file_path}'", timeout=10)
+                file_info = stdout.read().decode().strip()
+
+                if file_info:
+                    print(f"✓ 文件权限设置成功")
+                    print(f"文件信息: {file_info}")
+                    return True
+                else:
+                    print("⚠ 权限设置可能成功，但无法验证")
+                    return True
+            else:
+                error_msg = stderr.read().decode().strip()
+                print(f"✗ 设置文件权限失败: {error_msg}")
+                return False
+
+        except Exception as e:
+            print(f"设置文件权限时出错: {e}")
+            return False
+
     def verify_file_transfer(self, ssh_client: paramiko.SSHClient, source_file: str, target_path: str) -> bool:
         """验证文件传输是否成功"""
         try:
@@ -649,19 +902,26 @@ class SSHFileTransfer:
 
                     if remote_md5.lower() == source_md5.lower():
                         print("✓ MD5验证成功")
-                        return True
                     else:
                         print("⚠ MD5验证失败（可能是base64编码导致的换行符问题）")
                         print("但文件大小验证成功，传输可能已成功")
-                        return True
                 else:
                     print("无法获取远程文件MD5，但文件大小验证成功")
-                    return True
 
             except Exception as e:
                 print(f"MD5验证出错: {e}")
                 print("但文件大小验证成功，传输可能已成功")
-                return True
+
+            # 设置文件权限（如果配置中启用了）
+            if self.config.get('set_permissions', False):
+                permissions = self.config.get('file_permissions', '644')
+                if not self.set_remote_file_permissions(ssh_client, target_path, permissions):
+                    print("⚠ 文件权限设置失败，但文件传输成功")
+                    return True  # 权限设置失败不影响传输成功状态
+            else:
+                print("跳过文件权限设置")
+
+            return True
 
         except Exception as e:
             print(f"文件传输验证出错: {e}")
@@ -1565,10 +1825,12 @@ printf "\\x00"
     def run(self):
         try:
             self.get_user_input()
+
             # 处理目标路径
             target_dir = self.config['target_dir']
             source_file = self.config['source_file']
             target_filename = self.config['target_filename']
+
             if target_dir.endswith('/'):
                 if not target_filename:
                     target_filename = os.path.basename(source_file)
@@ -1578,25 +1840,123 @@ printf "\\x00"
                     target_path = target_dir + '/' + target_filename
                 else:
                     target_path = target_dir
+
             self.config['target_path'] = target_path
             self.save_config()
             print("配置已保存到: ssh_transfer_config.json")
+
             # 开始传输
             success = self.transfer_file(source_file, target_path)
+
             if success:
                 print("✓ 文件传输成功！")
+                # 将成功传输的配置添加到历史记录
+                self.add_to_history(self.config)
+                print("配置已添加到历史记录")
             else:
                 print("✗ 文件传输失败！")
+
         except KeyboardInterrupt:
             print("\n用户中断操作")
         except Exception as e:
             print(f"程序运行出错: {e}")
 
+    def manage_history(self):
+        """管理历史记录"""
+        while True:
+            print("\n=== 历史记录管理 ===")
+            print("1. 查看历史记录")
+            print("2. 删除指定记录")
+            print("3. 清空所有记录")
+            print("4. 返回主菜单")
+
+            try:
+                choice = input("请选择操作 (1-4): ").strip()
+
+                if choice == '1':
+                    self.display_history()
+                elif choice == '2':
+                    self.delete_history_item()
+                elif choice == '3':
+                    self.clear_history()
+                elif choice == '4':
+                    break
+                else:
+                    print("无效选择，请输入 1-4")
+            except KeyboardInterrupt:
+                print("\n用户取消操作")
+                break
+            except Exception as e:
+                print(f"操作出错: {e}")
+
+    def delete_history_item(self):
+        """删除指定的历史记录"""
+        history_count = self.display_history()
+        if not history_count:
+            return
+
+        try:
+            choice = input(f"请选择要删除的记录 (1-{history_count}) 或输入 'c' 取消: ").strip()
+
+            if choice.lower() == 'c':
+                return
+
+            choice_num = int(choice)
+            if 1 <= choice_num <= history_count:
+                deleted_item = self.history.pop(choice_num - 1)
+                self.save_history()
+                print(f"已删除记录: {deleted_item.get('description', '')}")
+            else:
+                print(f"无效选择，请输入 1-{history_count} 或 'c'")
+        except ValueError:
+            print("请输入有效的数字或 'c'")
+        except KeyboardInterrupt:
+            print("\n用户取消删除")
+
+    def clear_history(self):
+        """清空所有历史记录"""
+        try:
+            confirm = input("确定要清空所有历史记录吗？(y/N): ").strip().lower()
+            if confirm == 'y':
+                self.history.clear()
+                self.save_history()
+                print("所有历史记录已清空")
+            else:
+                print("取消清空操作")
+        except KeyboardInterrupt:
+            print("\n用户取消清空")
+
 
 def main():
     """主函数"""
     transfer = SSHFileTransfer()
-    transfer.run()
+
+    while True:
+        print("\n" + "="*50)
+        print("           SSH文件传输工具")
+        print("="*50)
+        print("1. 传输文件")
+        print("2. 管理历史记录")
+        print("3. 退出程序")
+
+        try:
+            choice = input("\n请选择操作 (1-3): ").strip()
+
+            if choice == '1':
+                transfer.run()
+            elif choice == '2':
+                transfer.manage_history()
+            elif choice == '3':
+                print("感谢使用SSH文件传输工具！")
+                break
+            else:
+                print("无效选择，请输入 1-3")
+        except KeyboardInterrupt:
+            print("\n\n感谢使用SSH文件传输工具！")
+            break
+        except Exception as e:
+            print(f"程序运行出错: {e}")
+            print("请重试...")
 
 
 if __name__ == "__main__":
