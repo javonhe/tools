@@ -38,6 +38,25 @@ def set_max_file_size(size_bytes):
     """设置最大文件大小配置"""
     _config['max_file_size'] = size_bytes
 
+def safe_filename(filename):
+    """安全处理文件名，确保中文文件名正确显示"""
+    try:
+        # 如果是URL编码的文件名，先解码
+        if '%' in filename:
+            filename = urllib.parse.unquote(filename)
+        return filename
+    except:
+        return filename
+
+def encode_filename_for_header(filename):
+    """为HTTP头部编码文件名，支持中文"""
+    try:
+        # 使用UTF-8编码，然后进行URL编码
+        encoded = urllib.parse.quote(filename.encode('utf-8'))
+        return f"UTF-8''{encoded}"
+    except:
+        return filename
+
 class FileHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -50,7 +69,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         # 主页
         if path == "/" or path == "/index.html":
             self.send_response(200)
-            self.send_header('Content-type', 'text/html')
+            self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
 
             # 加载之前的设置
@@ -109,11 +128,14 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                     # 格式化文件大小
                     size_str = format_file_size(file_size)
 
+                    # URL编码文件名用于下载链接
+                    encoded_filename = urllib.parse.quote(filename)
+
                     html += f"""
                     <li>
-                        <a href="/download/{filename}" download>{filename}</a>
+                        <a href="/download/{encoded_filename}" download>{filename}</a>
                         <span style="color:#666;">({size_str}, {file_time})</span>
-                        <a href="/delete/{filename}" style="color:red;float:right;">删除</a>
+                        <a href="/delete/{encoded_filename}" style="color:red;float:right;">删除</a>
                     </li>
                     """
 
@@ -124,17 +146,19 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
             </html>
             """
 
-            self.wfile.write(html.encode())
+            self.wfile.write(html.encode('utf-8'))
             return
 
         # 下载文件
         elif path.startswith('/download/'):
-            filename = os.path.basename(path[10:])
+            filename = safe_filename(os.path.basename(path[10:]))
             if os.path.isfile(filename):
                 file_size = os.path.getsize(filename)
                 self.send_response(200)
                 self.send_header('Content-type', 'application/octet-stream')
-                self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+                # 使用RFC 6266标准编码文件名，支持中文
+                encoded_filename = encode_filename_for_header(filename)
+                self.send_header('Content-Disposition', f'attachment; filename="{encoded_filename}"')
                 self.send_header('Content-Length', str(file_size))
                 self.end_headers()
 
@@ -161,7 +185,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
 
         # 删除文件
         elif path.startswith('/delete/'):
-            filename = os.path.basename(path[8:])
+            filename = safe_filename(os.path.basename(path[8:]))
             if os.path.isfile(filename) and filename != PREFERENCES_FILE:
                 os.remove(filename)
                 self.send_response(302)
@@ -189,8 +213,12 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
 
                 # 检查文件是否被上传
                 if fileitem.filename:
-                    # 保存文件
+                    # 保存文件，处理中文文件名
                     filename = os.path.basename(fileitem.filename)
+                    # 确保文件名是UTF-8编码
+                    if isinstance(filename, bytes):
+                        filename = filename.decode('utf-8', errors='ignore')
+
                     try:
                         with open(filename, 'wb') as f:
                             # 使用流式写入，避免内存溢出
