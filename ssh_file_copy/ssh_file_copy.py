@@ -3,6 +3,7 @@
 """
 SSH文件传输工具
 支持用户输入、配置保存、文件传输和MD5校验
+支持SOCKS5代理连接
 """
 
 import os
@@ -15,6 +16,8 @@ from typing import Optional, Dict, Any, List
 import time
 import base64
 from datetime import datetime
+import socket
+import socks
 
 
 class SSHFileTransfer:
@@ -57,7 +60,12 @@ class SSHFileTransfer:
             "target_dir": "",
             "target_filename": "",
             "file_permissions": "644",  # 默认文件权限
-            "set_permissions": False    # 是否设置文件权限
+            "set_permissions": False,    # 是否设置文件权限
+            "use_proxy": False,
+            "proxy_host": "",
+            "proxy_port": 1080,
+            "proxy_username": "",
+            "proxy_password": ""
         }
 
     def save_config(self):
@@ -92,6 +100,10 @@ class SSHFileTransfer:
             "target_path": config.get('target_path', ''),
             "file_permissions": config.get('file_permissions', '644'),
             "set_permissions": config.get('set_permissions', False),
+            "use_proxy": config.get('use_proxy', False),
+            "proxy_host": config.get('proxy_host', ''),
+            "proxy_port": config.get('proxy_port', 1080),
+            "proxy_username": config.get('proxy_username', ''),
             "description": f"{config.get('ip', '')}:{config.get('port', 22)} - {config.get('username', '')} - {os.path.basename(config.get('source_file', ''))}"
         }
 
@@ -139,6 +151,11 @@ class SSHFileTransfer:
             print(f"    目标: {record.get('target_path', '')}")
             if record.get('set_permissions', False):
                 print(f"    权限: {record.get('file_permissions', '644')}")
+            if record.get('use_proxy', False):
+                proxy_info = f"代理: {record.get('proxy_host', '')}:{record.get('proxy_port', '')}"
+                if record.get('proxy_username', ''):
+                    proxy_info += f" (用户: {record.get('proxy_username', '')})"
+                print(f"    {proxy_info}")
             print()
 
         return len(self.history)
@@ -172,7 +189,12 @@ class SSHFileTransfer:
                         "target_filename": selected_record.get('target_filename', ''),
                         "target_path": selected_record.get('target_path', ''),
                         "file_permissions": selected_record.get('file_permissions', '644'),
-                        "set_permissions": selected_record.get('set_permissions', False)
+                        "set_permissions": selected_record.get('set_permissions', False),
+                        "use_proxy": selected_record.get('use_proxy', False),
+                        "proxy_host": selected_record.get('proxy_host', ''),
+                        "proxy_port": selected_record.get('proxy_port', 1080),
+                        "proxy_username": selected_record.get('proxy_username', ''),
+                        "proxy_password": ""  # 代理密码需要重新输入
                     }
 
                     # 提示用户输入密码
@@ -295,6 +317,61 @@ class SSHFileTransfer:
         target_filename = input(f"目标文件名 (可选，留空使用原文件名) [{self.config.get('target_filename', '')}]: ").strip()
         if target_filename:
             self.config['target_filename'] = target_filename
+
+        # 代理设置
+        print("\n=== 代理设置 ===")
+        use_proxy = self.config.get('use_proxy', False)
+        proxy_input = input(f"是否使用SOCKS5代理 (y/n) [{use_proxy}]: ").strip().lower()
+        
+        if proxy_input in ['y', 'yes', 'true'] or (not proxy_input and use_proxy):
+            self.config['use_proxy'] = True
+            print("启用SOCKS5代理连接")
+            
+            # 代理主机
+            proxy_host = input(f"代理主机地址 [{self.config.get('proxy_host', '')}]: ").strip()
+            if proxy_host:
+                self.config['proxy_host'] = proxy_host
+            elif not self.config.get('proxy_host'):
+                self.config['proxy_host'] = input("代理主机地址: ").strip()
+            
+            # 代理端口
+            proxy_port_input = input(f"代理端口 [{self.config.get('proxy_port', 1080)}]: ").strip()
+            if proxy_port_input:
+                try:
+                    self.config['proxy_port'] = int(proxy_port_input)
+                except ValueError:
+                    print("端口必须是数字，使用默认值1080")
+                    self.config['proxy_port'] = 1080
+            elif not self.config.get('proxy_port'):
+                self.config['proxy_port'] = 1080
+            
+            # 代理用户名（可选）
+            proxy_username = input(f"代理用户名 (可选) [{self.config.get('proxy_username', '')}]: ").strip()
+            if proxy_username:
+                self.config['proxy_username'] = proxy_username
+            elif not self.config.get('proxy_username'):
+                self.config['proxy_username'] = ""
+            
+            # 代理密码（可选）
+            if self.config['proxy_username']:
+                proxy_password = getpass.getpass("代理密码 (可选，留空表示无密码): ")
+                if proxy_password:
+                    self.config['proxy_password'] = proxy_password
+                else:
+                    self.config['proxy_password'] = ""
+            else:
+                self.config['proxy_password'] = ""
+                
+        elif proxy_input in ['n', 'no', 'false'] or (not proxy_input and not use_proxy):
+            self.config['use_proxy'] = False
+            self.config['proxy_host'] = ""
+            self.config['proxy_port'] = 1080
+            self.config['proxy_username'] = ""
+            self.config['proxy_password'] = ""
+            print("不使用代理连接")
+        else:
+            # 保持原有配置
+            pass
 
         # 文件权限设置
         print("\n=== 文件权限设置 ===")
@@ -781,15 +858,54 @@ class SSHFileTransfer:
 
             # 创建新连接
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh_client.connect(
-                hostname=self.config['ip'],
-                port=self.config['port'],
-                username=self.config['username'],
-                password=self.config['password'],
-                timeout=30,
-                banner_timeout=60,
-                auth_timeout=60
-            )
+            
+            # 配置代理
+            if self.config['use_proxy']:
+                print(f"使用SOCKS5代理重新连接到 {self.config['ip']}:{self.config['port']}")
+                proxy_host = self.config['proxy_host']
+                proxy_port = self.config['proxy_port']
+                proxy_username = self.config['proxy_username']
+                proxy_password = self.config['proxy_password']
+
+                # 使用socket monkey-patching来支持SOCKS5代理
+                original_socket = socket.socket
+                
+                def create_proxy_socket(*args, **kwargs):
+                    proxy_socket = socks.socksocket(*args, **kwargs)
+                    if proxy_username and proxy_password:
+                        proxy_socket.set_proxy(socks.SOCKS5, proxy_host, proxy_port, username=proxy_username, password=proxy_password)
+                    elif proxy_username:
+                        proxy_socket.set_proxy(socks.SOCKS5, proxy_host, proxy_port, username=proxy_username)
+                    else:
+                        proxy_socket.set_proxy(socks.SOCKS5, proxy_host, proxy_port)
+                    return proxy_socket
+                
+                # 临时替换socket.socket
+                socket.socket = create_proxy_socket
+                
+                try:
+                    ssh_client.connect(
+                        hostname=self.config['ip'],
+                        port=self.config['port'],
+                        username=self.config['username'],
+                        password=self.config['password'],
+                        timeout=30,
+                        banner_timeout=60,
+                        auth_timeout=60
+                    )
+                finally:
+                    # 恢复原始socket
+                    socket.socket = original_socket
+            else:
+                ssh_client.connect(
+                    hostname=self.config['ip'],
+                    port=self.config['port'],
+                    username=self.config['username'],
+                    password=self.config['password'],
+                    timeout=30,
+                    banner_timeout=60,
+                    auth_timeout=60
+                )
 
             # 等待连接稳定
             time.sleep(1)
@@ -1139,15 +1255,54 @@ class SSHFileTransfer:
         try:
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh_client.connect(
-                hostname=self.config['ip'],
-                port=self.config['port'],
-                username=self.config['username'],
-                password=self.config['password'],
-                timeout=30,
-                banner_timeout=60,
-                auth_timeout=60
-            )
+
+            # 配置代理
+            if self.config['use_proxy']:
+                print(f"使用SOCKS5代理连接到 {self.config['ip']}:{self.config['port']}")
+                proxy_host = self.config['proxy_host']
+                proxy_port = self.config['proxy_port']
+                proxy_username = self.config['proxy_username']
+                proxy_password = self.config['proxy_password']
+
+                # 使用socket monkey-patching来支持SOCKS5代理
+                original_socket = socket.socket
+                
+                def create_proxy_socket(*args, **kwargs):
+                    proxy_socket = socks.socksocket(*args, **kwargs)
+                    if proxy_username and proxy_password:
+                        proxy_socket.set_proxy(socks.SOCKS5, proxy_host, proxy_port, username=proxy_username, password=proxy_password)
+                    elif proxy_username:
+                        proxy_socket.set_proxy(socks.SOCKS5, proxy_host, proxy_port, username=proxy_username)
+                    else:
+                        proxy_socket.set_proxy(socks.SOCKS5, proxy_host, proxy_port)
+                    return proxy_socket
+                
+                # 临时替换socket.socket
+                socket.socket = create_proxy_socket
+                
+                try:
+                    ssh_client.connect(
+                        hostname=self.config['ip'],
+                        port=self.config['port'],
+                        username=self.config['username'],
+                        password=self.config['password'],
+                        timeout=30,
+                        banner_timeout=60,
+                        auth_timeout=60
+                    )
+                finally:
+                    # 恢复原始socket
+                    socket.socket = original_socket
+            else:
+                ssh_client.connect(
+                    hostname=self.config['ip'],
+                    port=self.config['port'],
+                    username=self.config['username'],
+                    password=self.config['password'],
+                    timeout=30,
+                    banner_timeout=60,
+                    auth_timeout=60
+                )
             return ssh_client
         except Exception as e:
             print(f"创建SSH连接失败: {e}")
